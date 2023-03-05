@@ -1,4 +1,4 @@
-// Copyright (c) 2021 The Bitcoin Core developers
+// Copyright (c) 2021-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,7 +6,7 @@
 #include <netbase.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
-#include <test/fuzz/util.h>
+#include <test/fuzz/util/net.h>
 
 #include <cstdint>
 #include <string>
@@ -64,7 +64,7 @@ FUZZ_TARGET(netbase_dns_lookup)
     }
     {
         CSubNet resolved_subnet;
-        if (LookupSubNet(name, resolved_subnet, fuzzed_dns_lookup_function)) {
+        if (LookupSubNet(name, resolved_subnet)) {
             assert(resolved_subnet.IsValid());
         }
     }

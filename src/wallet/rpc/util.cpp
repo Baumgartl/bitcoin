@@ -1,18 +1,37 @@
-// Copyright (c) 2011-2021 The Bitcoin Core developers
+// Copyright (c) 2011-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <wallet/rpc/util.h>
 
+#include <common/url.h>
 #include <rpc/util.h>
-#include <util/url.h>
+#include <util/system.h>
+#include <util/translation.h>
 #include <wallet/context.h>
 #include <wallet/wallet.h>
 
 #include <univalue.h>
 
+#include <boost/date_time/posix_time/posix_time.hpp>
+
+namespace wallet {
 static const std::string WALLET_ENDPOINT_BASE = "/wallet/";
 const std::string HELP_REQUIRING_PASSPHRASE{"\nRequires wallet passphrase to be set with walletpassphrase call if wallet is encrypted.\n"};
+
+int64_t ParseISO8601DateTime(const std::string& str)
+{
+    static const boost::posix_time::ptime epoch = boost::posix_time::from_time_t(0);
+    static const std::locale loc(std::locale::classic(),
+        new boost::posix_time::time_input_facet("%Y-%m-%dT%H:%M:%SZ"));
+    std::istringstream iss(str);
+    iss.imbue(loc);
+    boost::posix_time::ptime ptime(boost::date_time::not_a_date_time);
+    iss >> ptime;
+    if (ptime.is_not_a_date_time() || epoch > ptime)
+        return 0;
+    return (ptime - epoch).total_seconds();
+}
 
 bool GetAvoidReuseFlag(const CWallet& wallet, const UniValue& param) {
     bool can_avoid_reuse = wallet.IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE);
@@ -57,17 +76,16 @@ std::shared_ptr<CWallet> GetWalletForJSONRPCRequest(const JSONRPCRequest& reques
 
     std::string wallet_name;
     if (GetWalletNameFromJSONRPCRequest(request, wallet_name)) {
-        const std::shared_ptr<CWallet> pwallet = GetWallet(context, wallet_name);
+        std::shared_ptr<CWallet> pwallet = GetWallet(context, wallet_name);
         if (!pwallet) throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Requested wallet does not exist or is not loaded");
         return pwallet;
     }
 
-    std::vector<std::shared_ptr<CWallet>> wallets = GetWallets(context);
-    if (wallets.size() == 1) {
-        return wallets[0];
-    }
+    size_t count{0};
+    auto wallet = GetDefaultWallet(context, count);
+    if (wallet) return wallet;
 
-    if (wallets.empty()) {
+    if (count == 0) {
         throw JSONRPCError(
             RPC_WALLET_NOT_FOUND, "No wallet is loaded. Load a wallet using loadwallet or create a new one with createwallet. (Note: A default wallet is no longer automatically created)");
     }
@@ -99,7 +117,7 @@ LegacyScriptPubKeyMan& EnsureLegacyScriptPubKeyMan(CWallet& wallet, bool also_cr
         spk_man = wallet.GetOrCreateLegacyScriptPubKeyMan();
     }
     if (!spk_man) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "This type of wallet does not support this command");
+        throw JSONRPCError(RPC_WALLET_ERROR, "Only legacy wallets are supported by this command");
     }
     return *spk_man;
 }
@@ -108,15 +126,55 @@ const LegacyScriptPubKeyMan& EnsureConstLegacyScriptPubKeyMan(const CWallet& wal
 {
     const LegacyScriptPubKeyMan* spk_man = wallet.GetLegacyScriptPubKeyMan();
     if (!spk_man) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "This type of wallet does not support this command");
+        throw JSONRPCError(RPC_WALLET_ERROR, "Only legacy wallets are supported by this command");
     }
     return *spk_man;
 }
 
 std::string LabelFromValue(const UniValue& value)
 {
-    std::string label = value.get_str();
+    static const std::string empty_string;
+    if (value.isNull()) return empty_string;
+
+    const std::string& label{value.get_str()};
     if (label == "*")
         throw JSONRPCError(RPC_WALLET_INVALID_LABEL_NAME, "Invalid label name");
     return label;
 }
+
+void PushParentDescriptors(const CWallet& wallet, const CScript& script_pubkey, UniValue& entry)
+{
+    UniValue parent_descs(UniValue::VARR);
+    for (const auto& desc: wallet.GetWalletDescriptors(script_pubkey)) {
+        parent_descs.push_back(desc.descriptor->ToString());
+    }
+    entry.pushKV("parent_descs", parent_descs);
+}
+
+void HandleWalletError(const std::shared_ptr<CWallet> wallet, DatabaseStatus& status, bilingual_str& error)
+{
+    if (!wallet) {
+        // Map bad format to not found, since bad format is returned when the
+        // wallet directory exists, but doesn't contain a data file.
+        RPCErrorCode code = RPC_WALLET_ERROR;
+        switch (status) {
+            case DatabaseStatus::FAILED_NOT_FOUND:
+            case DatabaseStatus::FAILED_BAD_FORMAT:
+                code = RPC_WALLET_NOT_FOUND;
+                break;
+            case DatabaseStatus::FAILED_ALREADY_LOADED:
+                code = RPC_WALLET_ALREADY_LOADED;
+                break;
+            case DatabaseStatus::FAILED_ALREADY_EXISTS:
+                code = RPC_WALLET_ALREADY_EXISTS;
+                break;
+            case DatabaseStatus::FAILED_INVALID_BACKUP_FILE:
+                code = RPC_INVALID_PARAMETER;
+                break;
+            default: // RPC_WALLET_ERROR is returned for all other cases.
+                break;
+        }
+        throw JSONRPCError(code, error.original);
+    }
+}
+} // namespace wallet
